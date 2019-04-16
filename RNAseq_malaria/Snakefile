@@ -1,0 +1,56 @@
+rule all:
+    input:'3_DE/diffExp.0.05.tab'
+
+ht = [1,2,3,4,5,6,7,8]
+day_8 = ['10_7-1p', '11_33-4p', '12_56p', '13_7p', '14_57-1p', '6_61-7p', '7_14-4p', '8_42-3p', '9_2-4p']
+day_20 = ['6_56-4p', '7_0-24p', '8_4p', '9_0-04p', '10_0-03p', '11_0-1p', '12_4-8p', '13_4p', '14_0-3p']
+
+rule Mapping_indexing_genome:
+    input:
+        genome = "data/genome/PlasmoDB-39_PrelictumSGS1-like_Genome.fasta",
+        gtf = "data/genome/PlasmoDB-39_PrelictumSGS1-like.gtf"
+    output:
+        exons = "1_mapping/genome.exon",
+        index = expand ("1_mapping/genome.{sample}.ht2", sample=ht)
+    shell:
+        '''
+        extract_exons.py {input.gtf} > 1_mapping/genome.exon
+        extract_splice_sites.py {input.gtf} > 1_mapping/genome.ss
+        hisat2-build {input.genome} 1_mapping/genome --exon 1_mapping/genome.exon --ss 1_mapping/genome.ss
+        '''
+
+rule Real_Mapping:
+    input:
+        D8_1 = expand ("data/parasite_reads/D8_Bird{sample}.1.fq.gz", sample = day_8),
+        D8_2 = expand ("data/parasite_reads/D8_Bird{sample}.2.fq.gz", sample = day_8),
+        D20_1 = expand ("data/parasite_reads/D20_Bird{sample}.1.fq.gz", sample = day_20),
+        D20_2 = expand ("data/parasite_reads/D20_Bird{sample}.2.fq.gz", sample = day_20)
+    output:
+        sam = expand("1_mapping/D8_Bird{sample}.sam", sample = day_8),
+        sum = expand("1_mapping/D8_Bird{sample}.sam.summary", sample = day_8)
+    shell:
+        '''
+         ls data/parasite_reads/ | grep D8|cut -f 1 -d .|uniq|while read line; do hisat2 -p 6 --max-intronlen 5000 -1 data/parasite_reads/$line.1.fq.gz -2 data/parasite_reads/$line.2.fq.gz -x 1_mapping/genome -S 1_mapping/$line.sam  --summary-file 1_mapping/$line.sam.summary; done
+         ls data/parasite_reads/ | grep D20|cut -f 1 -d .|uniq|while read line; do hisat2 -p 6 --max-intronlen 5000 -1 data/parasite_reads/$line.1.fq.gz -2 data/parasite_reads/$line.2.fq.gz -x 1_mapping/genome -S 1_mapping/$line.sam  --summary-file 1_mapping/$line.sam.summary; done
+        '''
+
+rule count:
+    input:
+        D8 = expand ("1_mapping/D8_Bird{sample}.sam", sample = day_8),
+        D20 = expand ("1_mapping/D20_Bird{sample}.sam", sample = day_20)
+    output:
+        D8_count = expand ("2_Read_counts/D8_Bird{sample}.count", sample = day_8),
+        D20_count = expand ("2_Read_counts/D20_Bird{sample}.count", sample = day_20)
+    shell:
+        '''
+        ls 1_mapping | grep 'D8' | grep 'sam$' | cut -d . -f 1 | while read line; do htseq-count -s yes -t CDS 1_mapping/$line.sam data/genome/PlasmoDB-39_PrelictumSGS1-like.gtf | grep -v '^__' > 2_Read_counts/$line.count; done
+        ls 1_mapping | grep 'D20' | grep 'sam$' | cut -d . -f 1 | while read line; do htseq-count -s yes -t CDS 1_mapping/$line.sam data/genome/PlasmoDB-39_PrelictumSGS1-like.gtf | grep -v '^__' > 2_Read_counts/$line.count; done
+        '''
+rule DE_analysis:
+    input:
+        D8_count = expand ("2_Read_counts/D8_Bird{sample}.count", sample = day_8),
+        D20_count = expand ("2_Read_counts/D20_Bird{sample}.count", sample = day_20)
+    output:
+        '3_DE/diffExp.0.05.tab'
+    script:
+        "/script/DE_using_DEseq2.R"
