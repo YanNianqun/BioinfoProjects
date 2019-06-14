@@ -1,0 +1,146 @@
+ht = [1,2,3,4,5,6,7,8]
+reads= ['1309-20', '1461-10', 'D20_Bird6_56-4p', 'D36_Bird13_5-5p','D8_Bird6_61-7p','D8_Bird8_42-3p']
+
+rule Indexing_genome:
+    input:
+        genome = "data/genome/PlasmoDB-39_PrelictumSGS1-like_Genome.fasta",
+        gtf = "data/genome/PlasmoDB-39_PrelictumSGS1-like.gtf"
+    output:
+        exons = "1_mapping/genome.exon",
+        index = expand ("1_mapping/genome.{sample}.ht2", sample=ht)
+    shell:
+        '''
+        extract_exons.py {input.gtf} > 1_mapping/genome.exon
+        extract_splice_sites.py {input.gtf} > 1_mapping/genome.ss
+        hisat2-build {input.genome} 1_mapping/genome --exon 1_mapping/genome.exon --ss 1_mapping/genome.ss
+        '''
+rule Mapping_reads:
+    input:
+        expand ("data/{sample}.1.fq.gz", sample = reads),
+        expand ("data/{sample}.2.fq.gz", sample = reads)
+
+    output:
+        sam = expand("1_mapping/{sample}.sam", sample = reads),
+        sum = expand("1_mapping/{sample}.sam.summary", sample = reads)
+    shell:
+        '''
+         ls data| grep 'fq'|cut -d . -f 1|uniq| \
+         while read line; \
+            do hisat2 -p 6 --dta --max-intronlen 5000 \
+            -1 data/$line.1.fq.gz -2 data/$line.2.fq.gz \
+            -x 1_mapping/genome \
+            -S 1_mapping/$line.sam  \
+            --summary-file 1_mapping/$line.sam.summary; done
+        '''
+rule Mapping_Qulity_control:
+    input:
+        expand("1_mapping/{sample}.sam", sample = reads)
+    output:
+        expand("1_mapping/QC/{sample}_QF.bam", sample = reads)
+    shell:
+        '''
+        ls 1_mapping | grep '.sam$' | cut -d '.' -f 1 | while read line; \
+            do samtools view -b\
+                -q 20 \
+                -F 0x900 \
+                -@ 6 \
+                1_mapping/$line'.sam' \
+                > 1_mapping/QC/$line'_QF.bam'; done
+        '''
+
+rule Sort_bam:
+    input:
+        expand("1_mapping/QC/{sample}_QF.bam", sample = reads)
+    output:
+        expand("2_assemble/sorted_bam/{sample}_QF_sorted.bam", sample = reads)
+    shell:
+        '''
+        ls 1_mapping/QC | grep '.bam$' |  cut -d '.' -f 1 |while read line; \
+            do samtools sort \
+                -@ 6 \
+                1_mapping/QC/$line'.bam' \
+                > 2_assemble/sorted_bam/$line'_sorted.bam'; done
+        '''
+
+rule Assemble_reads:
+    input:
+        expand("2_assemble/sorted_bam/{sample}_QF_sorted.bam", sample = reads)
+    output:
+        expand("2_assemble/{sample}_QF_sorted.gtf", sample = reads)
+    shell:
+        '''
+        ls 2_assemble/sorted_bam | cut -d '.' -f 1 |while read line; \
+        do \
+            stringtie  2_assemble/sorted_bam/$line'.bam'\
+            -G data/genome/PlasmoDB-39_PrelictumSGS1-like.gff \
+            -o  2_assemble/$line'.gtf' \
+             -v -C -p 6 ; done
+        '''
+
+rule Merge_gtf:
+    input:
+        expand("2_assemble/{sample}_QF_sorted.gtf", sample = reads)
+    output:
+        expand("2_assemble/merged.gtf")
+    shell:
+        '''
+        ls 2_assemble/*sorted.gtf | ls 2_assemble/*sorted.gtf | while read line; do realpath $line >> 2_assemble//list/mergelist.txt;done
+        stringtie --merge -p 6  -o 2_assemble/merged.gtf 2_assemble/list/mergelist.txt
+        '''
+rule Identify_ORF:
+    input:
+        '2_assemble/merged.gtf',
+        'data/genome/PlasmoDB-39_PrelictumSGS1-like.gtf'
+    output:
+        '3_ORF/transcript.fasta.transdecoder.genome.gff3'
+    shell:
+        '''
+            cd 3_ORF
+            ../bin/TransDecoder-TransDecoder-v5.5.0/util/gtf_genome_to_cdna_fasta.pl ../2_assemble/merged.gtf ../data/genome/PlasmoDB-39_PrelictumSGS1-like_Genome.fasta > transcripts.fasta
+
+            ../bin/TransDecoder-TransDecoder-v5.5.0/util/gtf_to_alignment_gff3.pl ../2_assemble/merged.gtf > transcripts.gff3
+
+            ../bin/TransDecoder-TransDecoder-v5.5.0/TransDecoder.LongOrfs -t transcripts.fasta
+
+            ../bin/TransDecoder-TransDecoder-v5.5.0/TransDecoder.Predict -t  transcripts.fasta
+
+            ../bin/TransDecoder-TransDecoder-v5.5.0/util/cdna_alignment_orf_to_genome_orf.pl \
+                      transcripts.fasta.transdecoder.gff3 \
+                      transcripts.gff3 \
+                      transcripts.fasta > transcript.fasta.transdecoder.genome.gff3
+        '''
+#transcripts.fasta.transdecoder.gff3 is the output of the TransDecoder.Predict, but program has some problem, option setting directory "-O" doesn't work. So the output set to the working directory
+
+rule Gff_compare:
+    input:
+        '3_ORF/transcript.fasta.transdecoder.genome.gff3',
+        'data/genome/PlasmoDB-39_PrelictumSGS1-like.gtf'
+    output:
+        '4_Compare_with_Ref/gffcmp.combined.gtf',
+        '4_Compare_with_Ref/gffcmp.stats'
+    shell:
+        '''
+        cd 4_Compare_with_Ref
+        ../bin/gffcompare-0.11.2.Linux_x86_64/gffcompare -R -V -C -r ../data/genome/PlasmoDB-39_PrelictumSGS1-like.gtf ../3_ORF/transcript.fasta.transdecoder.genome.gff3
+        '''
+
+rule Output_novel_transcripts:
+    input:
+        '4_Compare_with_Ref/gffcmp.combined.gtf'
+    output:
+        '5_Blast/novel_transcripts.fasta'
+    shell:
+        '''
+        less 4_Compare_with_Ref/gffcmp.combined.gtf | grep 'class_code "u"' > 5_Blast/novel_transcripts.gtf
+         5_Blast/novel_transcripts.gtf /data/genome/PlasmoDB-39_PrelictumSGS1-like_Genome.fasta >  5_Blast/novel_transcripts.fasta
+        '''
+
+rule Blast:
+    input:
+        '5_Blast/novel_transcripts.fasta'
+    output:
+        '5_Blast/blast_result.txt'
+    shell:
+        '''
+        blast
+        '''
